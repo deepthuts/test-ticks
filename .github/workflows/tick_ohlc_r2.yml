@@ -71,7 +71,8 @@ jobs:
             find "$GITHUB_WORKSPACE/$WATCH_PATH" -type f | sed "s#^$GITHUB_WORKSPACE/##" > "$RUNNER_TEMP/manifest/changed_files.txt"
           else
             BEFORE="${{ github.event.before }}"
-            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              echo "Old commit not found, using all files in $WATCH_PATH"
               git ls-files "$WATCH_PATH" > "$RUNNER_TEMP/manifest/changed_files.txt"
             else
               git diff --name-only "$BEFORE" "${{ github.sha }}" -- "$WATCH_PATH" > "$RUNNER_TEMP/manifest/changed_files.txt"
