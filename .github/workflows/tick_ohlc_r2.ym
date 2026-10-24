@@ -1,0 +1,147 @@
+name: Tick data → 30s OHLC JSON → Cloudflare R2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "data/ticks/**"
+      - "scripts/**"
+      - ".github/workflows/tick_ohlc_r2.yml"
+  workflow_dispatch:
+    inputs:
+      watch_path:
+        description: "Folder in the repo containing tick files"
+        required: true
+        default: "data/ticks"
+        type: string
+      symbol:
+        description: "Symbol name"
+        required: true
+        default: "EURUSD"
+        type: string
+      interval_seconds:
+        description: "OHLC bucket size in seconds"
+        required: true
+        default: "30"
+        type: string
+      r2_prefix:
+        description: "Folder prefix in R2"
+        required: true
+        default: "ohlc/30s"
+        type: string
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+
+    env:
+      WATCH_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.watch_path || 'data/ticks' }}
+      SYMBOL: ${{ github.event_name == 'workflow_dispatch' && inputs.symbol || 'EURUSD' }}
+      INTERVAL_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.interval_seconds || '30' }}
+      R2_PREFIX: ${{ github.event_name == 'workflow_dispatch' && inputs.r2_prefix || 'ohlc/30s' }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy boto3
+
+      - name: Detect changed tick files
+        id: changed
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/manifest"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ ! -d "$GITHUB_WORKSPACE/$WATCH_PATH" ]; then
+              echo "Folder not found: $GITHUB_WORKSPACE/$WATCH_PATH"
+              exit 1
+            fi
+            find "$GITHUB_WORKSPACE/$WATCH_PATH" -type f | sed "s#^$GITHUB_WORKSPACE/##" > "$RUNNER_TEMP/manifest/changed_files.txt"
+          else
+            BEFORE="${{ github.event.before }}"
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              git ls-files "$WATCH_PATH" > "$RUNNER_TEMP/manifest/changed_files.txt"
+            else
+              git diff --name-only "$BEFORE" "${{ github.sha }}" -- "$WATCH_PATH" > "$RUNNER_TEMP/manifest/changed_files.txt"
+            fi
+          fi
+
+          echo "Changed files:"
+          cat "$RUNNER_TEMP/manifest/changed_files.txt" || true
+
+          if [ ! -s "$RUNNER_TEMP/manifest/changed_files.txt" ]; then
+            echo "HAS_FILES=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "HAS_FILES=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build OHLC JSON from tick files
+        if: steps.changed.outputs.HAS_FILES == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/ohlc"
+          python scripts/build_ohlc_json.py \
+            --files-file "$RUNNER_TEMP/manifest/changed_files.txt" \
+            --symbol "$SYMBOL" \
+            --interval "$INTERVAL_SECONDS" \
+            --output "$RUNNER_TEMP/ohlc/${SYMBOL}_ohlc_${INTERVAL_SECONDS}s.json"
+
+      - name: Upload JSON to Cloudflare R2
+        if: steps.changed.outputs.HAS_FILES == 'true'
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          python - <<'PY'
+          import os, glob
+          import boto3
+
+          account_id = os.environ["CLOUDFLARE_R2_ACCOUNT_ID"]
+          bucket = os.environ["CLOUDFLARE_R2_BUCKET"]
+          access_key = os.environ["CLOUDFLARE_R2_ACCESS_KEY_ID"]
+          secret_key = os.environ["CLOUDFLARE_R2_SECRET_ACCESS_KEY"]
+          prefix = os.environ["R2_PREFIX"].strip("/")
+          symbol = os.environ["SYMBOL"]
+          interval = os.environ["INTERVAL_SECONDS"]
+
+          files = sorted(glob.glob(os.path.join(os.environ["RUNNER_TEMP"], "ohlc", "*.json")))
+          if not files:
+              raise FileNotFoundError("No JSON output file found.")
+
+          local_file = files[0]
+          r2_key = f"{prefix}/{symbol}/{symbol}_ohlc_{interval}s.json"
+
+          endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+
+          s3 = boto3.client(
+              "s3",
+              endpoint_url=endpoint,
+              aws_access_key_id=access_key,
+              aws_secret_access_key=secret_key,
+              region_name="auto",
+          )
+
+          s3.upload_file(local_file, bucket, r2_key)
+          print(f"Uploaded to s3://{bucket}/{r2_key}")
+          PY
+
+      - name: Final summary
+        if: steps.changed.outputs.HAS_FILES == 'true'
+        run: |
+          echo "Tick processing complete"
+          echo "Symbol: $SYMBOL"
+          echo "Interval: $INTERVAL_SECONDS seconds"
+          echo "R2 prefix: $R2_PREFIX"
