@@ -160,7 +160,10 @@ def main():
         raise ValueError("No valid tick data found in repo folder.")
 
     combined = pd.concat(data_frames, ignore_index=True)
-       out_dir = Path(args.output_dir)
+    combined = combined.drop_duplicates()
+    result = aggregate_ohlc(combined, args.interval, args.symbol)
+
+    out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     generated = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -179,6 +182,7 @@ def main():
         with open(out_dir / f"{day}.json", "w", encoding="utf-8") as f:
             json.dump(payload, f, separators=(",", ":"), default=str)
         print(f"Saved {day}.json with {len(rows)} candles")
+
 
 if __name__ == "__main__":
     main()
