@@ -96,7 +96,7 @@ jobs:
             --files-file "$RUNNER_TEMP/manifest/changed_files.txt" \
             --symbol "$SYMBOL" \
             --interval "$INTERVAL_SECONDS" \
-            --output "$RUNNER_TEMP/ohlc/${SYMBOL}_ohlc_${INTERVAL_SECONDS}s.json"
+            --output-dir "$RUNNER_TEMP/ohlc"
 
       - name: Upload JSON to Cloudflare R2
         if: steps.changed.outputs.HAS_FILES == 'true'
@@ -122,8 +122,6 @@ jobs:
           if not files:
               raise FileNotFoundError("No JSON output file found.")
 
-          local_file = files[0]
-          r2_key = f"{prefix}/{symbol}/{symbol}_ohlc_{interval}s.json"
 
           endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
 
@@ -134,9 +132,16 @@ jobs:
               aws_secret_access_key=secret_key,
               region_name="auto",
           )
-
-          s3.upload_file(local_file, bucket, r2_key)
-          print(f"Uploaded to s3://{bucket}/{r2_key}")
+          for local_file in files:
+              day = os.path.basename(local_file)
+              r2_key = f"{prefix}/{symbol}/{day}"
+              s3.upload_file(
+                  local_file,
+                  bucket,
+                  r2_key,
+                  ExtraArgs={"ContentType": "application/json"},
+              )
+              print(f"Uploaded to s3://{bucket}/{r2_key}")
           PY
 
       - name: Final summary

@@ -138,7 +138,7 @@ def main():
     parser.add_argument("--files-file", required=True, help="Manifest with changed tick files")
     parser.add_argument("--symbol", required=True, help="Symbol name, e.g. EURUSD")
     parser.add_argument("--interval", type=int, default=30, help="OHLC interval in seconds")
-    parser.add_argument("--output", required=True, help="Output JSON path")
+    parser.add_argument("--output-dir", required=True, help="Folder for per-day JSON files")
     args = parser.parse_args()
 
     repo_root = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
@@ -160,23 +160,25 @@ def main():
         raise ValueError("No valid tick data found in repo folder.")
 
     combined = pd.concat(data_frames, ignore_index=True)
-    result = aggregate_ohlc(combined, args.interval, args.symbol)
+       out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = {
-        "symbol": args.symbol,
-        "interval_seconds": args.interval,
-        "generated_at_utc": pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "rows": result.to_dict(orient="records"),
-    }
+    generated = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    result["day"] = result["timestamp"].str[:10]
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, default=str)
-
-    print(f"Saved JSON to {out}")
-    print(json.dumps(payload["rows"][:3], indent=2))
-
+    for day, day_df in result.groupby("day"):
+        rows = day_df.drop(columns=["day", "symbol", "interval_seconds"])
+        rows = rows.astype(object).where(rows.notna(), None)
+        payload = {
+            "symbol": args.symbol,
+            "interval_seconds": args.interval,
+            "date": day,
+            "generated_at_utc": generated,
+            "rows": rows.to_dict(orient="records"),
+        }
+        with open(out_dir / f"{day}.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"), default=str)
+        print(f"Saved {day}.json with {len(rows)} candles")
 
 if __name__ == "__main__":
     main()
